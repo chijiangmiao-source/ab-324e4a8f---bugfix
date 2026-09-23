@@ -183,6 +183,88 @@ describe('双层最优解卷积', () => {
     }
   });
 
+  it('重复 25 段隔离同优片段（200 点、2^25 条同优解）：性能不随同优解数量退化', () => {
+    // 单段 w=[0,0,3,1,3,0,0,0]，核 [1,1]：位置 2/3 可在 {0,1} 中互换，
+    // 产生 2 条同优解；25 段彼此隔离 ⇒ 2^25 ≈ 3.3×10^7 条同优解。
+    // 旧实现逐条枚举路径会长期无响应；修复后只传播状态集合，应即时返回。
+    const block = [0, 0, 3, 1, 3, 0, 0, 0];
+    const groups = 25;
+    const waveform = Array.from({ length: groups }, () => block).flat();
+    const kernel = [1, 1];
+    const maxPulses = 4;
+
+    const startedAt = performance.now();
+    const r = solve({ waveform, kernel, maxPulses });
+    const wallMs = performance.now() - startedAt;
+
+    expect(r.m).toBe(200);
+    expect(r.n).toBe(199);
+    expect(r.bestAbs).toBe(125); // 每段 5（t=+3、t=+2 两处不可消除残差）
+    expect(r.bestPulses).toBe(25); // 每段恰 1 个脉冲
+    expect(wallMs).toBeLessThan(1000); // 常规测试时限内必须返回
+    expect(r.elapsedMs).toBeLessThan(1000);
+
+    // 零基脉冲位置 8g+2、8g+3 可取 {0,1}，其余只能取 {0}
+    const tied: number[] = [];
+    for (let j = 0; j < r.n; j++) {
+      if (r.achievable[j].length > 1) tied.push(j);
+    }
+    expect(tied).toEqual(
+      Array.from({ length: groups }, (_, g) => [8 * g + 2, 8 * g + 3]).flat(),
+    );
+    for (let g = 0; g < groups; g++) {
+      expect(r.achievable[8 * g + 2]).toEqual([0, 1]);
+      expect(r.achievable[8 * g + 3]).toEqual([0, 1]);
+      for (const off of [0, 1, 4, 5, 6, 7]) {
+        const j = 8 * g + off;
+        if (j < r.n) expect(r.achievable[j]).toEqual([0]);
+      }
+    }
+
+    // 规范解：每组 8g+3 取 1，其余取 0（字典序最小，脉冲放在靠后的并列位置）
+    const expectedCanonical = new Array<number>(r.n).fill(0);
+    for (let g = 0; g < groups; g++) expectedCanonical[8 * g + 3] = 1;
+    expect(r.canonical).toEqual(expectedCanonical);
+
+    // 重建波形与有符号残差必须与规范向量一致：
+    // 每段重建仅在 8g+3、8g+4 为 1；残差为 8g+2 处 +3、8g+4 处 +2。
+    const expectedRecon = new Array<number>(200).fill(0);
+    const expectedResidual = new Array<number>(200).fill(0);
+    for (let g = 0; g < groups; g++) {
+      expectedRecon[8 * g + 3] = 1;
+      expectedRecon[8 * g + 4] = 1;
+      expectedResidual[8 * g + 2] = 3;
+      expectedResidual[8 * g + 4] = 2;
+    }
+    expect(r.reconstruction).toEqual(expectedRecon);
+    expect(r.residual).toEqual(expectedResidual);
+    expect(r.reconstruction).toEqual(convolve(r.canonical, kernel, 200));
+    expect(r.residual.every((v, t) => v === waveform[t] - r.reconstruction[t])).toBe(true);
+    expect(r.residual.reduce((a, v) => a + Math.abs(v), 0)).toBe(r.bestAbs);
+    expect(r.canonical.reduce((a, v) => a + v, 0)).toBe(r.bestPulses);
+  });
+
+  it('短记录单段同优：w=[0,0,3,1,3,0,0,0] 的多解集合与规范解', () => {
+    // 单段短记录：脉冲位置 2 与 3 在 {0,1} 间互换，共 2 条双层同优解；
+    // 规范解字典序最小，脉冲放在位置 3。
+    const waveform = [0, 0, 3, 1, 3, 0, 0, 0];
+    const r = solve({ waveform, kernel: [1, 1], maxPulses: 4 });
+    expect(r.bestAbs).toBe(5);
+    expect(r.bestPulses).toBe(1);
+    expect(r.canonical).toEqual([0, 0, 0, 1, 0, 0, 0]);
+    expect(r.achievable).toEqual([
+      [0],
+      [0],
+      [0, 1],
+      [0, 1],
+      [0],
+      [0],
+      [0],
+    ]);
+    expect(r.reconstruction).toEqual([0, 0, 0, 1, 1, 0, 0, 0]);
+    expect(r.residual).toEqual([0, 0, 3, 0, 2, 0, 0, 0]);
+  });
+
   it('非法输入抛出异常', () => {
     expect(() => solve({ waveform: [1, 2], kernel: [1, 1, 1], maxPulses: 4 })).toThrow();
     expect(() => solve({ waveform: [1, 2, 3], kernel: [1], maxPulses: 4 })).toThrow();

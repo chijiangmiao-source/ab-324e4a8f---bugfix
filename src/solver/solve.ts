@@ -39,7 +39,9 @@ export interface SolveResult {
  *
  * 由于 y[t] 只依赖 x[t−k+1..t]，以「最近 k−1 个脉冲取值」为状态做动态规划。
  * 每点脉冲上限 P ≤ 4、核长 k ≤ 7，故状态数 (P+1)^(k−1) ≤ 5^6 = 15625，
- * 反向扫一遍求最优完成代价，正向扫一遍统计同优集合并贪心构造规范解。
+ * 反向扫一遍求最优完成代价；正向只传播「可处于某条完整同优解上」的状态集合，
+ * 按位置汇总同优取值（不逐条枚举路径，同优解数量可随独立片段指数增长），
+ * 并沿最优边贪心取最小取值构造字典序规范解。
  */
 export function solve(input: SolveInput): SolveResult {
   const started = performance.now();
@@ -114,42 +116,75 @@ export function solve(input: SolveInput): SolveResult {
   const bestAbs = gAbs[0][0];
   const bestPulses = gPul[0][0];
 
+  // 正向（一）：逐位置汇总全部双层同优解的可取计数集合。
+  // live[t] 是「在某个完整同优解中，采样点 t 开始时所处状态」的集合：
+  //   live[0] = {0}；若 state ∈ live[t]，且边 (state,v) 的一步代价与
+  //   gAbs/gPul 的最优完成代价吻合，则 ns 进入 live[t+1]，并把 v 记入位置 t
+  //   （t < n 时 v 即 x[t]；尾部 t ≥ n 脉冲恒为 0，没有对应脉冲位置）。
+  // 只传播状态而非路径，复杂度与同优解总数无关，故独立同优片段再多也不退化。
   const valueSets = Array.from({ length: n }, () => new Set<number>());
-  const path = new Array<number>(n).fill(0);
-  let canonical: number[] | undefined;
-
-  const enumerateOptimal = (t: number, state: number) => {
-    if (t === m) {
-      if (canonical === undefined) canonical = [...path];
-      for (let j = 0; j < n; j++) valueSets[j].add(path[j]);
-      return;
-    }
-
+  let live = new Uint8Array(stateCount);
+  live[0] = 1;
+  for (let t = 0; t < m; t++) {
     const w = waveform[t];
     const vMax = t < n ? maxPulses : 0;
-    const row = state * base;
-    for (let v = 0; v <= vMax; v++) {
-      const ns = nextState[row + v];
-      const a = Math.abs(w - (convPart[state] + h0 * v)) + gAbs[t + 1][ns];
-      const p = v + gPul[t + 1][ns];
-      if (a !== gAbs[t][state] || p !== gPul[t][state]) continue;
-      if (t < n) path[t] = v;
-      enumerateOptimal(t + 1, ns);
+    const nxtLive = new Uint8Array(stateCount);
+    const curA = gAbs[t];
+    const curP = gPul[t];
+    const nxtA = gAbs[t + 1];
+    const nxtP = gPul[t + 1];
+    for (let state = 0; state < stateCount; state++) {
+      if (!live[state]) continue;
+      const conv = convPart[state];
+      const row = state * base;
+      const bestA = curA[state];
+      const bestP = curP[state];
+      for (let v = 0; v <= vMax; v++) {
+        const ns = nextState[row + v];
+        const a = Math.abs(w - (conv + h0 * v)) + nxtA[ns];
+        if (a !== bestA) continue;
+        const p = v + nxtP[ns];
+        if (p !== bestP) continue;
+        nxtLive[ns] = 1;
+        if (t < n) valueSets[t].add(v);
+      }
     }
-  };
+    live = nxtLive;
+  }
 
-  enumerateOptimal(0, 0);
-  const chosenCanonical = canonical ?? new Array<number>(n).fill(0);
+  // 正向（二）：沿最优边每步取最小取值，构造字典序最小的规范解。
+  // 在最优有向无环图上，当前步取可行的最小 v 绝不会排除存在一条完整同优后缀
+  //（可行性本就由 gAbs/gPul 的最优边定义），故贪心即得字典序最小向量。
+  const canonical = new Array<number>(n).fill(0);
+  let state = 0;
+  for (let t = 0; t < n; t++) {
+    const w = waveform[t];
+    const row = state * base;
+    const conv = convPart[state];
+    const bestA = gAbs[t][state];
+    const bestP = gPul[t][state];
+    for (let v = 0; v <= maxPulses; v++) {
+      const ns = nextState[row + v];
+      const a = Math.abs(w - (conv + h0 * v)) + gAbs[t + 1][ns];
+      if (a !== bestA) continue;
+      const p = v + gPul[t + 1][ns];
+      if (p !== bestP) continue;
+      canonical[t] = v;
+      state = ns;
+      break;
+    }
+  }
+
   const achievable = valueSets.map((values) => [...values].sort((a, b) => a - b));
 
-  const reconstruction = convolve(chosenCanonical, kernel, m);
+  const reconstruction = convolve(canonical, kernel, m);
   const residual = waveform.map((w, t) => w - reconstruction[t]);
   return {
     m,
     n,
     bestAbs,
     bestPulses,
-    canonical: chosenCanonical,
+    canonical,
     achievable,
     reconstruction,
     residual,
