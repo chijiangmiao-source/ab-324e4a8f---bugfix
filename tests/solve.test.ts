@@ -163,6 +163,67 @@ describe('双层最优解卷积', () => {
     });
   });
 
+  it('短记录：少量重复同优片段的多解集合与字典序规范解', () => {
+    // 3 段 [0,0,3,1,3,0,0,0]：每段的双层同优解为在 8g+2 / 8g+3 二取一放 1 个脉冲，
+    // 段间被足够长的零采样隔离，互不干扰。
+    const segment = [0, 0, 3, 1, 3, 0, 0, 0];
+    const waveform = Array.from({ length: 3 }, () => segment).flat();
+    expect(waveform).toHaveLength(24);
+    const r = solve({ waveform, kernel: [1, 1], maxPulses: 4 });
+    expect(r.bestAbs).toBe(15);
+    expect(r.bestPulses).toBe(3);
+    // 字典序最小 ⇒ 每组都在 8g+3 处放脉冲
+    const wantCanonical = new Array<number>(r.n).fill(0);
+    for (let g = 0; g < 3; g++) wantCanonical[8 * g + 3] = 1;
+    expect(r.canonical).toEqual(wantCanonical);
+    // 同优计数集合：8g+2 与 8g+3 为 {0,1}，其余位置只能取 {0}
+    r.achievable.forEach((set, j) => {
+      if (j % 8 === 2 || j % 8 === 3) expect(set).toEqual([0, 1]);
+      else expect(set).toEqual([0]);
+    });
+    expect(r.reconstruction).toEqual(convolve(wantCanonical, [1, 1], 24));
+    expect(r.residual).toEqual(waveform.map((w, t) => w - r.reconstruction[t]));
+  });
+
+  it('短记录对拍：2 段重复片段（上限 1）与暴力枚举完全一致', () => {
+    const segment = [0, 0, 3, 1, 3, 0, 0, 0];
+    const waveform = Array.from({ length: 2 }, () => segment).flat();
+    const got = solve({ waveform, kernel: [1, 1], maxPulses: 1 });
+    const want = bruteForce(waveform, [1, 1], 1);
+    expect(got.bestAbs).toBe(10);
+    expect(got.bestPulses).toBe(2);
+    expect(got.canonical).toEqual(want.canonical);
+    expect(got.achievable).toEqual(want.achievable);
+  });
+
+  it('长记录：25 个彼此隔离的同优片段（200 点）在常规时限内返回完整结果', () => {
+    // 同优解共 2^25 个；逐一枚举必然超时，动态规划须直接给出精确汇总。
+    const segment = [0, 0, 3, 1, 3, 0, 0, 0];
+    const waveform = Array.from({ length: 25 }, () => segment).flat();
+    expect(waveform).toHaveLength(200);
+    const r = solve({ waveform, kernel: [1, 1], maxPulses: 4 });
+    expect(r.elapsedMs).toBeLessThan(2000);
+    expect(r.m).toBe(200);
+    expect(r.n).toBe(199);
+    expect(r.bestAbs).toBe(125);
+    expect(r.bestPulses).toBe(25);
+    // 规范解：每组在 8g+3 处取 1，其余位置取 0
+    const wantCanonical = new Array<number>(199).fill(0);
+    for (let g = 0; g < 25; g++) wantCanonical[8 * g + 3] = 1;
+    expect(r.canonical).toEqual(wantCanonical);
+    // 精确可取计数集合：8g+2 与 8g+3 为 {0,1}，其余 149 个位置恰为 {0}
+    expect(r.achievable).toHaveLength(199);
+    r.achievable.forEach((set, j) => {
+      if (j % 8 === 2 || j % 8 === 3) expect(set).toEqual([0, 1]);
+      else expect(set).toEqual([0]);
+    });
+    // 重建波形与有符号残差必须和规范解的卷积一致
+    const wantRecon = convolve(wantCanonical, [1, 1], 200);
+    expect(r.reconstruction).toEqual(wantRecon);
+    expect(r.residual).toEqual(waveform.map((w, t) => w - wantRecon[t]));
+    expect(r.residual.reduce((a, v) => a + Math.abs(v), 0)).toBe(125);
+  });
+
   it('小规模随机案例与暴力枚举完全一致（含同优计数集合）', () => {
     const rand = lcg(42);
     for (let trial = 0; trial < 30; trial++) {

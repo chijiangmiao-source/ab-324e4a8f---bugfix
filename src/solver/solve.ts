@@ -38,8 +38,11 @@ export interface SolveResult {
  *   并给出每个位置在全部双层同优解中可取的精确计数集合。
  *
  * 由于 y[t] 只依赖 x[t−k+1..t]，以「最近 k−1 个脉冲取值」为状态做动态规划。
- * 每点脉冲上限 P ≤ 4、核长 k ≤ 7，故状态数 (P+1)^(k−1) ≤ 5^6 = 15625，
- * 反向扫一遍求最优完成代价，正向扫一遍统计同优集合并贪心构造规范解。
+ * 每点脉冲上限 P ≤ 4、核长 k ≤ 7，故状态数 (P+1)^(k−1) ≤ 5^6 = 15625。
+ * 反向扫一遍求最优完成代价；正向扫一遍维护「可由双层最优前缀到达」的状态
+ * 集合，逐位置统计同优可取计数（不逐一枚举同优解——同优解数量随相互独立
+ * 的同优片段指数增长，枚举会导致页面长时间无响应）；最后按字典序贪心构造
+ * 规范解。整体复杂度 O(m · 状态数 · (P+1))，与同优解总数无关。
  */
 export function solve(input: SolveInput): SolveResult {
   const started = performance.now();
@@ -114,42 +117,77 @@ export function solve(input: SolveInput): SolveResult {
   const bestAbs = gAbs[0][0];
   const bestPulses = gPul[0][0];
 
+  // 正向扫描：reachable[s] 表示「采样点 t 之前处于状态 s」能否由某条逐步与
+  // 双层最优完成代价衔接的脉冲前缀到达。一条完整路径是双层最优解，当且仅当
+  // 它的每一步取值都满足衔接条件（该步残差/脉冲与 g 值精确相等）；因此位置 t
+  // 的可取计数，恰好是某个可达状态在采样点 t 处满足衔接条件的取值。同优解
+  // 数量随独立同优片段指数增长，而本扫描保持 O(n · 状态数 · (P+1))。
   const valueSets = Array.from({ length: n }, () => new Set<number>());
-  const path = new Array<number>(n).fill(0);
-  let canonical: number[] | undefined;
-
-  const enumerateOptimal = (t: number, state: number) => {
-    if (t === m) {
-      if (canonical === undefined) canonical = [...path];
-      for (let j = 0; j < n; j++) valueSets[j].add(path[j]);
-      return;
-    }
-
+  let reachable = new Uint8Array(stateCount);
+  let reachableNext = new Uint8Array(stateCount);
+  reachable[0] = 1;
+  for (let t = 0; t < n; t++) {
+    reachableNext.fill(0);
     const w = waveform[t];
-    const vMax = t < n ? maxPulses : 0;
-    const row = state * base;
-    for (let v = 0; v <= vMax; v++) {
-      const ns = nextState[row + v];
-      const a = Math.abs(w - (convPart[state] + h0 * v)) + gAbs[t + 1][ns];
-      const p = v + gPul[t + 1][ns];
-      if (a !== gAbs[t][state] || p !== gPul[t][state]) continue;
-      if (t < n) path[t] = v;
-      enumerateOptimal(t + 1, ns);
+    const curA = gAbs[t];
+    const curP = gPul[t];
+    const nxtA = gAbs[t + 1];
+    const nxtP = gPul[t + 1];
+    const values = valueSets[t];
+    for (let s = 0; s < stateCount; s++) {
+      if (reachable[s] === 0) continue;
+      const conv = convPart[s];
+      const wantA = curA[s];
+      const wantP = curP[s];
+      const row = s * base;
+      for (let v = 0; v <= maxPulses; v++) {
+        const ns = nextState[row + v];
+        const a = Math.abs(w - (conv + h0 * v)) + nxtA[ns];
+        if (a !== wantA) continue;
+        const p = v + nxtP[ns];
+        if (p !== wantP) continue;
+        values.add(v);
+        reachableNext[ns] = 1;
+      }
     }
-  };
+    const swap = reachable;
+    reachable = reachableNext;
+    reachableNext = swap;
+  }
 
-  enumerateOptimal(0, 0);
-  const chosenCanonical = canonical ?? new Array<number>(n).fill(0);
+  // 字典序最小规范解：从初始状态出发逐位贪心，取仍与双层最优完成代价衔接的
+  // 最小计数。衔接条件保证剩余部分必然能补全为双层最优解，故逐位最小即整体
+  // 字典序最小。
+  const canonical = new Array<number>(n).fill(0);
+  let state = 0;
+  for (let t = 0; t < n; t++) {
+    const w = waveform[t];
+    const conv = convPart[state];
+    const wantA = gAbs[t][state];
+    const wantP = gPul[t][state];
+    const row = state * base;
+    for (let v = 0; v <= maxPulses; v++) {
+      const ns = nextState[row + v];
+      const a = Math.abs(w - (conv + h0 * v)) + gAbs[t + 1][ns];
+      if (a !== wantA) continue;
+      const p = v + gPul[t + 1][ns];
+      if (p !== wantP) continue;
+      canonical[t] = v;
+      state = ns;
+      break;
+    }
+  }
+
   const achievable = valueSets.map((values) => [...values].sort((a, b) => a - b));
 
-  const reconstruction = convolve(chosenCanonical, kernel, m);
+  const reconstruction = convolve(canonical, kernel, m);
   const residual = waveform.map((w, t) => w - reconstruction[t]);
   return {
     m,
     n,
     bestAbs,
     bestPulses,
-    canonical: chosenCanonical,
+    canonical,
     achievable,
     reconstruction,
     residual,
