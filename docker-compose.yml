@@ -1,0 +1,31 @@
+name: scintillation-deconv-audit
+
+services:
+  # 静态 Web 服务：宿主机端口由 WEB_PORT 配置（默认 8080）
+  web:
+    build:
+      context: .
+      target: web
+    image: scintillation-deconv-audit-web
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+  # 一次性校验：跑完代码测试、构建检查、HTTP 冒烟后自行退出，退出码即结论
+  verify:
+    build:
+      context: .
+      target: verify
+    image: scintillation-deconv-audit-verify
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      WEB_URL: http://web:80
+    restart: "no"
